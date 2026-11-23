@@ -1,0 +1,543 @@
+name: Build HaxBall Mobile APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Generar proyecto Android
+        run: |
+          D=hm
+          J=$D/app/src/main/java/com/hazball/mobile
+          mkdir -p $J $D/app/src/main/res/drawable
+
+          cat > $D/settings.gradle <<'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "HaxBallMobile"
+          include ':app'
+          EOF
+
+          cat > $D/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF
+
+          cat > $D/gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=false
+          EOF
+
+          cat > $D/app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+          android {
+              namespace 'com.hazball.mobile'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.hazball.mobile'
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF
+
+          cat > $D/app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+              <application
+                  android:label="HaxBall Mobile"
+                  android:icon="@drawable/ic_launcher"
+                  android:hardwareAccelerated="true"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="sensorLandscape"
+                      android:configChanges="orientation|screenSize|keyboardHidden|keyboard|screenLayout|smallestScreenSize|uiMode"
+                      android:windowSoftInputMode="adjustPan">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > $D/app/src/main/res/drawable/ic_launcher.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#1B5E20" android:pathData="M0,0h108v108h-108z"/>
+              <path android:fillColor="#FFFFFF" android:pathData="M54,54m-34,0a34,34 0,1 1,68 0a34,34 0,1 1,-68 0"/>
+              <path android:fillColor="#E53935" android:pathData="M54,54m-18,0a18,18 0,1 1,36 0a18,18 0,1 1,-36 0"/>
+              <path android:fillColor="#111111" android:pathData="M54,54m-7,0a7,7 0,1 1,14 0a7,7 0,1 1,-14 0"/>
+          </vector>
+          EOF
+
+          cat > $J/MainActivity.java <<'EOF'
+          package com.hazball.mobile;
+
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.content.SharedPreferences;
+          import android.graphics.Color;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.view.WindowManager;
+          import android.webkit.CookieManager;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceError;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.FrameLayout;
+
+          public class MainActivity extends Activity {
+              private static final String URL = "https://www.haxball.com/play";
+              private static final String[] SIZES = {"Pequeño", "Mediano", "Grande"};
+              private WebView web;
+              private ControlsView controls;
+              private MenuView menu;
+              private SharedPreferences prefs;
+              private boolean playing = false;
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  if (Build.VERSION.SDK_INT >= 28) {
+                      getWindow().getAttributes().layoutInDisplayCutoutMode =
+                          WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                  }
+                  prefs = getSharedPreferences("hm", MODE_PRIVATE);
+
+                  FrameLayout root = new FrameLayout(this);
+                  root.setBackgroundColor(Color.BLACK);
+
+                  web = new WebView(this);
+                  setupWeb();
+
+                  controls = new ControlsView(this, web);
+                  controls.show = prefs.getBoolean("show", true);
+                  controls.sizeIdx = prefs.getInt("size", 1);
+                  controls.onGear = this::showOptions;
+                  controls.setVisibility(View.GONE);
+
+                  menu = new MenuView(this, this::startPlay);
+
+                  ViewGroup.LayoutParams full = new ViewGroup.LayoutParams(
+                      ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
+                  root.addView(web, full);
+                  root.addView(controls, full);
+                  root.addView(menu, full);
+                  setContentView(root);
+
+                  web.loadUrl(URL); // precarga mientras se ve el menú
+              }
+
+              private void setupWeb() {
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+                  s.setUseWideViewPort(true);
+                  s.setLoadWithOverviewMode(true);
+                  s.setSupportZoom(false);
+                  s.setBuiltInZoomControls(false);
+                  s.setJavaScriptCanOpenWindowsAutomatically(true);
+                  s.setCacheMode(WebSettings.LOAD_DEFAULT);
+                  s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+                  // UA de Chrome normal (sin "wv") para que el captcha funcione
+                  s.setUserAgentString("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                      + "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+
+                  CookieManager cm = CookieManager.getInstance();
+                  cm.setAcceptCookie(true);
+                  cm.setAcceptThirdPartyCookies(web, true);
+
+                  web.setBackgroundColor(Color.BLACK);
+                  web.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+                  web.setOverScrollMode(View.OVER_SCROLL_NEVER);
+                  web.setWebChromeClient(new WebChromeClient());
+                  web.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
+                          if (r.isForMainFrame()) {
+                              v.loadDataWithBaseURL(null,
+                                  "<body style='background:#000;color:#fff;font-family:sans-serif;"
+                                  + "text-align:center;padding-top:15%'><h2>Sin conexión</h2>"
+                                  + "<p>Toca el botón ☰ y elige Recargar sala.</p></body>",
+                                  "text/html", "utf-8", null);
+                          }
+                      }
+                  });
+              }
+
+              private void startPlay() {
+                  playing = true;
+                  menu.setVisibility(View.GONE);
+                  controls.setVisibility(View.VISIBLE);
+                  controls.relayout();
+                  web.requestFocus();
+              }
+
+              private void showMenu() {
+                  playing = false;
+                  controls.releaseAll();
+                  controls.setVisibility(View.GONE);
+                  menu.setVisibility(View.VISIBLE);
+              }
+
+              private void showOptions() {
+                  String[] items = {
+                      controls.show ? "Ocultar controles" : "Mostrar controles",
+                      "Tamaño de controles: " + SIZES[controls.sizeIdx],
+                      "Recargar sala",
+                      "Menú principal"
+                  };
+                  new AlertDialog.Builder(this).setTitle("HaxBall Mobile")
+                      .setItems(items, (dlg, i) -> {
+                          if (i == 0) {
+                              controls.setShow(!controls.show);
+                              prefs.edit().putBoolean("show", controls.show).apply();
+                          } else if (i == 1) {
+                              controls.setSizeIdx((controls.sizeIdx + 1) % 3);
+                              prefs.edit().putInt("size", controls.sizeIdx).apply();
+                          } else if (i == 2) {
+                              web.loadUrl(URL);
+                          } else {
+                              showMenu();
+                          }
+                      }).show();
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (playing) {
+                      if (web.canGoBack()) web.goBack(); else showMenu();
+                  } else {
+                      finish();
+                  }
+              }
+
+              @Override
+              public void onWindowFocusChanged(boolean hasFocus) {
+                  super.onWindowFocusChanged(hasFocus);
+                  if (hasFocus) {
+                      getWindow().getDecorView().setSystemUiVisibility(
+                          View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                          | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                          | View.SYSTEM_UI_FLAG_FULLSCREEN
+                          | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                          | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                          | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
+                  }
+              }
+
+              @Override protected void onPause() { super.onPause(); controls.releaseAll(); web.onPause(); }
+              @Override protected void onResume() { super.onResume(); web.onResume(); }
+              @Override protected void onDestroy() { super.onDestroy(); web.destroy(); }
+          }
+          EOF
+
+          cat > $J/ControlsView.java <<'EOF'
+          package com.hazball.mobile;
+
+          import android.content.Context;
+          import android.graphics.Canvas;
+          import android.graphics.Paint;
+          import android.graphics.Typeface;
+          import android.os.SystemClock;
+          import android.view.KeyEvent;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.webkit.WebView;
+
+          /** Joystick + botón de patear. Envía flechas y X al WebView como teclas reales. */
+          public class ControlsView extends View {
+              private static final float[] SCALES = {0.8f, 1f, 1.3f};
+              private final WebView web;
+              private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final float den;
+              public boolean show = true;
+              public int sizeIdx = 1;
+              public Runnable onGear;
+
+              private float jx, jy, jr, kx, ky, kr, gx, gy, gr, knobX, knobY;
+              private int joyPtr = -1, kickPtr = -1;
+              private boolean kU, kD, kL, kR, kK;
+
+              public ControlsView(Context c, WebView w) {
+                  super(c);
+                  web = w;
+                  den = c.getResources().getDisplayMetrics().density;
+                  p.setStrokeCap(Paint.Cap.ROUND);
+              }
+
+              public void setShow(boolean s) { show = s; releaseAll(); }
+              public void setSizeIdx(int i) { sizeIdx = i; relayout(); invalidate(); }
+
+              public void relayout() {
+                  int w = getWidth(), h = getHeight();
+                  if (w == 0) return;
+                  float s = SCALES[sizeIdx];
+                  jr = 62 * den * s; jx = 34 * den + jr; jy = h - 28 * den - jr;
+                  kr = 46 * den * s; kx = w - 40 * den - kr; ky = h - 34 * den - kr;
+                  gr = 20 * den; gx = w - 40 * den; gy = 34 * den;
+                  knobX = jx; knobY = jy;
+              }
+
+              @Override protected void onSizeChanged(int w, int h, int ow, int oh) { relayout(); }
+
+              @Override
+              protected void onDraw(Canvas c) {
+                  // botón de opciones (☰)
+                  p.setStyle(Paint.Style.FILL); p.setColor(0x66000000);
+                  c.drawCircle(gx, gy, gr, p);
+                  p.setColor(0xDDFFFFFF); p.setStrokeWidth(2.5f * den);
+                  for (int i = -1; i <= 1; i++) c.drawLine(gx - 8 * den, gy + i * 6 * den, gx + 8 * den, gy + i * 6 * den, p);
+                  if (!show) return;
+
+                  // joystick
+                  p.setStyle(Paint.Style.FILL); p.setColor(0x33FFFFFF);
+                  c.drawCircle(jx, jy, jr, p);
+                  p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(3 * den); p.setColor(0x88FFFFFF);
+                  c.drawCircle(jx, jy, jr, p);
+                  p.setStyle(Paint.Style.FILL); p.setColor(0xAAFFFFFF);
+                  c.drawCircle(knobX, knobY, jr * 0.42f, p);
+
+                  // patear
+                  p.setColor(kK ? 0xDDE53935 : 0x88E53935);
+                  c.drawCircle(kx, ky, kr, p);
+                  p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(3 * den); p.setColor(0xCCFFFFFF);
+                  c.drawCircle(kx, ky, kr, p);
+                  p.setStyle(Paint.Style.FILL); p.setColor(0xFFFFFFFF);
+                  p.setTextAlign(Paint.Align.CENTER);
+                  p.setTypeface(Typeface.DEFAULT_BOLD);
+                  p.setTextSize(15 * den * SCALES[sizeIdx]);
+                  c.drawText("PATEAR", kx, ky + 5 * den * SCALES[sizeIdx], p);
+              }
+
+              @Override
+              public boolean onTouchEvent(MotionEvent e) {
+                  int a = e.getActionMasked();
+                  switch (a) {
+                      case MotionEvent.ACTION_DOWN:
+                      case MotionEvent.ACTION_POINTER_DOWN: {
+                          int i = e.getActionIndex();
+                          float x = e.getX(i), y = e.getY(i);
+                          int id = e.getPointerId(i);
+                          if (Math.hypot(x - gx, y - gy) < gr * 1.6f) {
+                              if (onGear != null) onGear.run();
+                              return true;
+                          }
+                          if (!show) return false;
+                          if (joyPtr == -1 && Math.hypot(x - jx, y - jy) < jr * 1.5f) {
+                              joyPtr = id;
+                              if (!web.hasFocus()) web.requestFocus();
+                              updateJoy(x, y);
+                              invalidate();
+                              return true;
+                          }
+                          if (kickPtr == -1 && Math.hypot(x - kx, y - ky) < kr * 1.4f) {
+                              kickPtr = id;
+                              if (!web.hasFocus()) web.requestFocus();
+                              setKick(true);
+                              invalidate();
+                              return true;
+                          }
+                          return false; // el toque pasa al WebView (menús, chat, captcha)
+                      }
+                      case MotionEvent.ACTION_MOVE:
+                          for (int i = 0; i < e.getPointerCount(); i++) {
+                              if (e.getPointerId(i) == joyPtr) updateJoy(e.getX(i), e.getY(i));
+                          }
+                          invalidate();
+                          return true;
+                      case MotionEvent.ACTION_UP:
+                      case MotionEvent.ACTION_POINTER_UP:
+                      case MotionEvent.ACTION_CANCEL: {
+                          int id = e.getPointerId(e.getActionIndex());
+                          if (a == MotionEvent.ACTION_CANCEL) {
+                              releaseAll();
+                          } else {
+                              if (id == joyPtr) { joyPtr = -1; knobX = jx; knobY = jy; setDirs(false, false, false, false); }
+                              if (id == kickPtr) { kickPtr = -1; setKick(false); }
+                          }
+                          invalidate();
+                          return true;
+                      }
+                  }
+                  return true;
+              }
+
+              private void updateJoy(float x, float y) {
+                  float dx = x - jx, dy = y - jy;
+                  float dist = (float) Math.hypot(dx, dy);
+                  if (dist > jr) { dx = dx * jr / dist; dy = dy * jr / dist; dist = jr; }
+                  knobX = jx + dx; knobY = jy + dy;
+                  boolean l = false, r = false, u = false, d = false;
+                  if (dist > jr * 0.25f) {
+                      float t = dist * 0.38f; // sectores de 45° (8 direcciones)
+                      r = dx > t; l = dx < -t; d = dy > t; u = dy < -t;
+                  }
+                  setDirs(l, r, u, d);
+              }
+
+              private void setDirs(boolean l, boolean r, boolean u, boolean d) {
+                  if (l != kL) { kL = l; key(KeyEvent.KEYCODE_DPAD_LEFT, l); }
+                  if (r != kR) { kR = r; key(KeyEvent.KEYCODE_DPAD_RIGHT, r); }
+                  if (u != kU) { kU = u; key(KeyEvent.KEYCODE_DPAD_UP, u); }
+                  if (d != kD) { kD = d; key(KeyEvent.KEYCODE_DPAD_DOWN, d); }
+              }
+
+              private void setKick(boolean k) {
+                  if (k != kK) { kK = k; key(KeyEvent.KEYCODE_X, k); }
+              }
+
+              private void key(int code, boolean down) {
+                  long t = SystemClock.uptimeMillis();
+                  web.dispatchKeyEvent(new KeyEvent(t, t,
+                      down ? KeyEvent.ACTION_DOWN : KeyEvent.ACTION_UP, code, 0));
+              }
+
+              public void releaseAll() {
+                  joyPtr = -1; kickPtr = -1;
+                  knobX = jx; knobY = jy;
+                  setDirs(false, false, false, false);
+                  setKick(false);
+                  invalidate();
+              }
+
+              @Override protected void onDetachedFromWindow() { super.onDetachedFromWindow(); releaseAll(); }
+          }
+          EOF
+
+          cat > $J/MenuView.java <<'EOF'
+          package com.hazball.mobile;
+
+          import android.content.Context;
+          import android.graphics.Canvas;
+          import android.graphics.LinearGradient;
+          import android.graphics.Paint;
+          import android.graphics.RadialGradient;
+          import android.graphics.RectF;
+          import android.graphics.Shader;
+          import android.graphics.Typeface;
+          import android.view.MotionEvent;
+          import android.view.View;
+
+          public class MenuView extends View {
+              private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final RectF btn = new RectF();
+              private final Runnable onPlay;
+              private final float den;
+
+              public MenuView(Context c, Runnable onPlay) {
+                  super(c);
+                  this.onPlay = onPlay;
+                  den = c.getResources().getDisplayMetrics().density;
+              }
+
+              @Override
+              protected void onDraw(Canvas c) {
+                  int w = getWidth(), h = getHeight();
+
+                  // fondo cancha
+                  p.setStyle(Paint.Style.FILL);
+                  p.setShader(new LinearGradient(0, 0, 0, h, 0xFF07210F, 0xFF1D6A2C, Shader.TileMode.CLAMP));
+                  c.drawRect(0, 0, w, h, p);
+                  p.setShader(null);
+                  p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(3 * den); p.setColor(0x22FFFFFF);
+                  c.drawCircle(w * 0.27f, h * 0.5f, h * 0.46f, p);
+
+                  // pelota
+                  float bx = w * 0.27f, by = h * 0.5f, br = h * 0.28f;
+                  p.setStyle(Paint.Style.FILL);
+                  p.setShader(new RadialGradient(bx, by, br * 1.7f, 0x66FF5252, 0x00FF5252, Shader.TileMode.CLAMP));
+                  c.drawCircle(bx, by, br * 1.7f, p);
+                  p.setShader(new RadialGradient(bx - br * 0.3f, by - br * 0.35f, br * 1.3f,
+                      0xFFFFFFFF, 0xFFB0BEC5, Shader.TileMode.CLAMP));
+                  c.drawCircle(bx, by, br, p);
+                  p.setShader(null);
+                  p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(br * 0.14f); p.setColor(0xFFE53935);
+                  c.drawCircle(bx, by, br * 0.62f, p);
+                  p.setStrokeWidth(br * 0.06f); p.setColor(0xFF111111);
+                  c.drawCircle(bx, by, br, p);
+                  p.setStyle(Paint.Style.FILL);
+                  c.drawCircle(bx, by, br * 0.22f, p);
+
+                  // título
+                  float tx = w * 0.52f;
+                  p.setTextAlign(Paint.Align.LEFT);
+                  p.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD_ITALIC));
+                  p.setColor(0xFFFFFFFF); p.setTextSize(h * 0.20f);
+                  c.drawText("HaxBall", tx, h * 0.40f, p);
+                  p.setColor(0xFFFF5252); p.setTextSize(h * 0.12f); p.setLetterSpacing(0.25f);
+                  c.drawText("MOBILE", tx, h * 0.55f, p);
+                  p.setLetterSpacing(0f);
+
+                  // botón jugar
+                  btn.set(tx, h * 0.65f, tx + h * 0.55f, h * 0.65f + h * 0.14f);
+                  p.setColor(0xFFE53935);
+                  c.drawRoundRect(btn, h * 0.07f, h * 0.07f, p);
+                  p.setColor(0xFFFFFFFF); p.setTextAlign(Paint.Align.CENTER); p.setTextSize(h * 0.07f);
+                  c.drawText("JUGAR", btn.centerX(), btn.centerY() + h * 0.025f, p);
+
+                  p.setTypeface(Typeface.DEFAULT); p.setTextAlign(Paint.Align.LEFT);
+                  p.setColor(0x99FFFFFF); p.setTextSize(h * 0.04f);
+                  c.drawText("Entra a una sala o crea la tuya", tx, h * 0.90f, p);
+              }
+
+              @Override
+              public boolean onTouchEvent(MotionEvent e) {
+                  if (e.getActionMasked() == MotionEvent.ACTION_UP && btn.contains(e.getX(), e.getY())) {
+                      onPlay.run();
+                  }
+                  return true;
+              }
+          }
+          EOF
+
+      - name: Compilar APK
+        working-directory: hm
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HaxBallMobile-APK
+          path: hm/app/build/outputs/apk/debug/app-debug.apk
